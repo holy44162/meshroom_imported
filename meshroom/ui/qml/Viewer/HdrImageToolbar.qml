@@ -10,12 +10,21 @@ FloatingPane {
     padding: 5
     radius: 0
 
-    property real gammaDefaultValue: 1
-    property real offsetDefaultValue: 0
-    property real gammaValue: gammaCtrl.value
-    property real offsetValue: offsetCtrl.value
+    property real gainDefaultValue: 1.0
+    property real gammaDefaultValue: 1.0
+
+    function resetDefaultValues(){
+        gainCtrl.value = root.gainDefaultValue;
+        gammaCtrl.value = root.gammaDefaultValue;
+    }
+
+    property real slidersPowerValue: 4.0
+    property real gainValue: Math.pow(gainCtrl.value, slidersPowerValue)
+    property real gammaValue: Math.pow(gammaCtrl.value, slidersPowerValue)
     property string channelModeValue: channelsCtrl.value
     property variant colorRGBA: null
+
+    property bool colorPickerVisible: true
 
     background: Rectangle { color: root.palette.window }
 
@@ -44,7 +53,7 @@ FloatingPane {
             model: channels
         }
 
-        // offset slider
+        // gain slider
         RowLayout {
             spacing: 5
 
@@ -56,30 +65,30 @@ FloatingPane {
                 ToolTip.text: "Reset Gain"
 
                 onClicked: {
-                    offsetCtrl.value = offsetDefaultValue;
+                    gainCtrl.value = gainDefaultValue;
                 }
             }
             TextField {
-                id: offsetLabel
+                id: gainLabel
 
                 ToolTip.visible: ToolTip.text && hovered
                 ToolTip.delay: 100
                 ToolTip.text: "Color Gain (in linear colorspace)"
 
-                text: offsetValue.toFixed(2)
-                Layout.preferredWidth: textMetrics_offsetValue.width
+                text: gainValue.toFixed(2)
+                Layout.preferredWidth: textMetrics_gainValue.width
                 selectByMouse: true
                 validator: doubleValidator
                 onAccepted: {
-                    offsetCtrl.value = Number(offsetLabel.text)
+                    gainCtrl.value = Math.pow(Number(gainLabel.text), 1.0/slidersPowerValue)
                 }
             }
             Slider {
-                id: offsetCtrl
+                id: gainCtrl
                 Layout.fillWidth: true
-                from: -1
-                to: 1
-                value: 0
+                from: 0.01
+                to: 2
+                value: gainDefaultValue
                 stepSize: 0.01
             }
         }
@@ -107,33 +116,35 @@ FloatingPane {
                 ToolTip.text: "Apply Gamma (after Gain and in linear colorspace)"
 
                 text: gammaValue.toFixed(2)
-                Layout.preferredWidth: textMetrics_offsetValue.width
+                Layout.preferredWidth: textMetrics_gainValue.width
                 selectByMouse: true
                 validator: doubleValidator
                 onAccepted: {
-                    gammaCtrl.value = Number(offsetLabel.text)
+                    gammaCtrl.value = Math.pow(Number(gammaLabel.text), 1.0/slidersPowerValue)
                 }
             }
             Slider {
                 id: gammaCtrl
                 Layout.fillWidth: true
                 from: 0.01
-                to: 16
-                value: 1
+                to: 2
+                value: gammaDefaultValue
                 stepSize: 0.01
             }
         }
 
         Rectangle {
+            visible: colorPickerVisible
             Layout.preferredWidth: 20
             implicitWidth: 20
             implicitHeight: parent.height
             color: root.colorRGBA ? Qt.rgba(red.value_gamma, green.value_gamma, blue.value_gamma, 1.0) : "black"
         }
 
-        // gamma slider
+        // RGBA colors
         RowLayout {
             spacing: 1
+            visible: colorPickerVisible
             TextField {
                 id: red
                 property real value: root.colorRGBA ? root.colorRGBA.x : 0.0
@@ -230,8 +241,8 @@ FloatingPane {
         text: "1.2345" // use one more than expected to get the correct value (probably needed due to TextField margin)
     }
     TextMetrics {
-        id: textMetrics_offsetValue
-        font: offsetLabel.font
-        text: "-10.01"
+        id: textMetrics_gainValue
+        font: gainLabel.font
+        text: "1.2345"
     }
 }

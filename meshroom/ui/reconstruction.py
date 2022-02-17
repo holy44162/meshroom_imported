@@ -111,7 +111,7 @@ class LiveSfmManager(QObject):
         to include those images to the reconstruction.
         """
         # Get all new images in the watched folder
-        imagesInFolder = multiview.findFilesByTypeInFolder(self._folder)
+        imagesInFolder = multiview.findFilesByTypeInFolder(self._folder).images
         newImages = set(imagesInFolder).difference(self.allImages)
         for imagePath in newImages:
             # print('[LiveSfmManager] New image file : {}'.format(imagePath))
@@ -345,9 +345,7 @@ class ViewpointWrapper(QObject):
             return None
         pp = self.solvedIntrinsics["principalPoint"]
         # compute principal point offset in UV space
-        uvPP = QVector2D(float(pp[0]) / self.imageSize.width(), float(pp[1]) / self.imageSize.height())
-        # convert to offset
-        offset = uvPP - QVector2D(0.5, 0.5)
+        offset = QVector2D(float(pp[0]) / self.imageSize.width(), float(pp[1]) / self.imageSize.height())
         # apply orientation to principal point correction
         if self.orientation == 6:
             offset = QVector2D(-offset.y(), offset.x())
@@ -360,8 +358,8 @@ class ViewpointWrapper(QObject):
         """ Get camera vertical field of view in degrees. """
         if not self.solvedIntrinsics:
             return None
-        pxFocalLength = float(self.solvedIntrinsics["pxFocalLength"])
-        return 2.0 * math.atan(self.orientedImageSize.height() / (2.0 * pxFocalLength)) * 180 / math.pi
+        pxFocalLength = self.solvedIntrinsics["pxFocalLength"]
+        return 2.0 * math.atan(self.orientedImageSize.height() / (2.0 * float(pxFocalLength[0]))) * 180 / math.pi
 
     @Property(type=QUrl, notify=denseSceneParamsChanged)
     def undistortedImageSource(self):
@@ -413,14 +411,18 @@ class Reconstruction(UIGraph):
     Specialization of a UIGraph designed to manage a 3D reconstruction.
     """
     activeNodeCategories = {
+        # All nodes generating a sfm scene (3D reconstruction or panorama)
         "sfm": ["StructureFromMotion", "GlobalSfM", "PanoramaEstimation", "SfMTransfer", "SfMTransform",
                 "SfMAlignment"],
-        "undistort": ["PrepareDenseScene", "PanoramaWarping"],
+        # All nodes generating a sfmData file
+        "sfmData": ["CameraInit", "DistortionCalibration", "StructureFromMotion", "GlobalSfM", "PanoramaEstimation", "SfMTransfer", "SfMTransform",
+                "SfMAlignment"],
+        # All nodes generating depth map files
         "allDepthMap": ["DepthMap", "DepthMapFilter"],
     }
 
-    def __init__(self, defaultPipeline='', parent=None):
-        super(Reconstruction, self).__init__(parent)
+    def __init__(self, undoStack, taskManager, defaultPipeline='', parent=None):
+        super(Reconstruction, self).__init__(undoStack, taskManager, parent)
 
         # initialize member variables for key steps of the 3D reconstruction pipeline
 
@@ -473,7 +475,7 @@ class Reconstruction(UIGraph):
 
     def onCameraInitChanged(self):
         # Update active nodes when CameraInit changes
-        nodes = self._graph.nodesFromNode(self._cameraInit)[0]
+        nodes = self._graph.dfsOnDiscover(startNodes=[self._cameraInit], reverse=True)[0]
         self.setActiveNodes(nodes)
 
     @Slot()
@@ -490,6 +492,15 @@ class Reconstruction(UIGraph):
         elif p.lower() == "panoramafisheyehdr":
             # default panorama fisheye hdr pipeline
             self.setGraph(multiview.panoramaFisheyeHdr())
+        elif p.lower() == "photogrammetryandcameratracking":
+            # default camera tracking pipeline
+            self.setGraph(multiview.photogrammetryAndCameraTracking())
+        elif p.lower() == "cameratracking":
+            # default camera tracking pipeline
+            self.setGraph(multiview.cameraTracking())
+        elif p.lower() == "photogrammetrydraft":
+            # photogrammetry pipeline in draft mode (no cuda)
+            self.setGraph(multiview.photogrammetryDraft())
         else:
             # use the user-provided default photogrammetry project file
             self.load(p, setupProjectFile=False)
@@ -570,7 +581,7 @@ class Reconstruction(UIGraph):
         return self._cameraInit.viewpoints.value if self._cameraInit else QObjectListModel(parent=self)
 
     def updateCameraInits(self):
-        cameraInits = self._graph.nodesByType("CameraInit", sortedByIndex=True)
+        cameraInits = self._graph.nodesOfType("CameraInit", sortedByIndex=True)
         if set(self._cameraInits.objectList()) == set(cameraInits):
             return
         self._cameraInits.setObjectList(cameraInits)
@@ -651,7 +662,7 @@ class Reconstruction(UIGraph):
         """
         if not startNode:
             return None
-        nodes = self._graph.nodesFromNode(startNode, nodeTypes)[0]
+        nodes = self._graph.dfsOnDiscover(startNodes=[startNode], filterTypes=nodeTypes, reverse=True)[0]
         if not nodes:
             return None
         node = nodes[-1]
@@ -739,9 +750,10 @@ class Reconstruction(UIGraph):
                         "",
                     ))
             else:
-                panoramaInitNodes = self.graph.nodesByType('PanoramaInit')
+                panoramaInitNodes = self.graph.nodesOfType('PanoramaInit')
                 for panoramaInfoFile in filesByType.panoramaInfo:
                     for panoramaInitNode in panoramaInitNodes:
+                        panoramaInitNode.attribute('initializeCameras').value = 'File'
                         panoramaInitNode.attribute('config').value = panoramaInfoFile
                 if panoramaInitNodes:
                     self.info.emit(
@@ -1069,10 +1081,10 @@ class Reconstruction(UIGraph):
         vp = None
         if self.viewpoints:
             vp = next((v for v in self.viewpoints if str(v.viewId.value) == self._selectedViewId), None)
-        self.setSelectedViewpoint(vp)
+        self._setSelectedViewpoint(vp)
         self.selectedViewIdChanged.emit()
 
-    def setSelectedViewpoint(self, viewpointAttribute):
+    def _setSelectedViewpoint(self, viewpointAttribute):
         if self._selectedViewpoint:
             # Reconstruction has ownership of Viewpoint object - destroy it when not needed anymore
             self._selectedViewpoint.deleteLater()

@@ -10,7 +10,7 @@ class Attribute(BaseObject):
     """
     """
 
-    def __init__(self, name, label, description, value, advanced, uid, group, enabled):
+    def __init__(self, name, label, description, value, advanced, semantic, uid, group, enabled):
         super(Attribute, self).__init__()
         self._name = name
         self._label = label
@@ -20,6 +20,7 @@ class Attribute(BaseObject):
         self._group = group
         self._advanced = advanced
         self._enabled = enabled
+        self._semantic = semantic
 
     name = Property(str, lambda self: self._name, constant=True)
     label = Property(str, lambda self: self._label, constant=True)
@@ -29,6 +30,7 @@ class Attribute(BaseObject):
     group = Property(str, lambda self: self._group, constant=True)
     advanced = Property(bool, lambda self: self._advanced, constant=True)
     enabled = Property(Variant, lambda self: self._enabled, constant=True)
+    semantic = Property(str, lambda self: self._semantic, constant=True)
     type = Property(str, lambda self: self.__class__.__name__, constant=True)
 
     def validateValue(self, value):
@@ -39,12 +41,12 @@ class Attribute(BaseObject):
         """
         raise NotImplementedError("Attribute.validateValue is an abstract function that should be implemented in the derived class.")
 
-    def matchDescription(self, value, conform=False):
+    def matchDescription(self, value, strict=True):
         """ Returns whether the value perfectly match attribute's description.
 
         Args:
             value: the value
-            conform: try to adapt value to match the description
+            strict: strict test for the match (for instance, regarding a group with some parameter changes)
         """
         try:
             self.validateValue(value)
@@ -55,13 +57,13 @@ class Attribute(BaseObject):
 
 class ListAttribute(Attribute):
     """ A list of Attributes """
-    def __init__(self, elementDesc, name, label, description, group='allParams', advanced=False, enabled=True, joinChar=' '):
+    def __init__(self, elementDesc, name, label, description, group='allParams', advanced=False, semantic='', enabled=True, joinChar=' '):
         """
         :param elementDesc: the Attribute description of elements to store in that list
         """
         self._elementDesc = elementDesc
         self._joinChar = joinChar
-        super(ListAttribute, self).__init__(name=name, label=label, description=description, value=[], uid=(), group=group, advanced=advanced, enabled=enabled)
+        super(ListAttribute, self).__init__(name=name, label=label, description=description, value=[], uid=(), group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     elementDesc = Property(Attribute, lambda self: self._elementDesc, constant=True)
     uid = Property(Variant, lambda self: self.elementDesc.uid, constant=True)
@@ -80,25 +82,25 @@ class ListAttribute(Attribute):
             raise ValueError('ListAttribute only supports list/tuple input values (param:{}, value:{}, type:{})'.format(self.name, value, type(value)))
         return value
 
-    def matchDescription(self, value, conform=False):
+    def matchDescription(self, value, strict=True):
         """ Check that 'value' content matches ListAttribute's element description. """
-        if not super(ListAttribute, self).matchDescription(value, conform):
+        if not super(ListAttribute, self).matchDescription(value, strict):
             return False
         # list must be homogeneous: only test first element
         if value:
-            return self._elementDesc.matchDescription(value[0], conform)
+            return self._elementDesc.matchDescription(value[0], strict)
         return True
 
 
 class GroupAttribute(Attribute):
     """ A macro Attribute composed of several Attributes """
-    def __init__(self, groupDesc, name, label, description, group='allParams', advanced=False, enabled=True, joinChar=' '):
+    def __init__(self, groupDesc, name, label, description, group='allParams', advanced=False, semantic='', enabled=True, joinChar=' '):
         """
         :param groupDesc: the description of the Attributes composing this group
         """
         self._groupDesc = groupDesc
         self._joinChar = joinChar
-        super(GroupAttribute, self).__init__(name=name, label=label, description=description, value={}, uid=(), group=group, advanced=advanced, enabled=enabled)
+        super(GroupAttribute, self).__init__(name=name, label=label, description=description, value={}, uid=(), group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     groupDesc = Property(Variant, lambda self: self._groupDesc, constant=True)
 
@@ -113,9 +115,13 @@ class GroupAttribute(Attribute):
             value = ast.literal_eval(value)
 
         if isinstance(value, dict):
-            invalidKeys = set(value.keys()).difference([attr.name for attr in self._groupDesc])
-            if invalidKeys:
-                raise ValueError('Value contains key that does not match group description : {}'.format(invalidKeys))
+            # invalidKeys = set(value.keys()).difference([attr.name for attr in self._groupDesc])
+            # if invalidKeys:
+            #     raise ValueError('Value contains key that does not match group description : {}'.format(invalidKeys))
+            if self._groupDesc:
+                commonKeys = set(value.keys()).intersection([attr.name for attr in self._groupDesc])
+                if not commonKeys:
+                    raise ValueError('Value contains no key that matches with the group description: {}'.format(commonKeys))
         elif isinstance(value, (list, tuple)):
             if len(value) != len(self._groupDesc):
                 raise ValueError('Value contains incoherent number of values: desc size: {}, value size: {}'.format(len(self._groupDesc), len(value)))
@@ -124,34 +130,29 @@ class GroupAttribute(Attribute):
 
         return value
 
-    def matchDescription(self, value, conform=False):
+    def matchDescription(self, value, strict=True):
         """
         Check that 'value' contains the exact same set of keys as GroupAttribute's group description
         and that every child value match corresponding child attribute description.
 
         Args:
             value: the value
-            conform: remove entries that don't exist in the description.
+            strict: strict test for the match (for instance, regarding a group with some parameter changes)
         """
         if not super(GroupAttribute, self).matchDescription(value):
             return False
         attrMap = {attr.name: attr for attr in self._groupDesc}
 
-        if conform:
-            # remove invalid keys
-            invalidKeys = set(value.keys()).difference([attr.name for attr in self._groupDesc])
-            for k in invalidKeys:
-                del self._groupDesc[k]
-        else:
-            # must have the exact same child attributes
-            if sorted(value.keys()) != sorted(attrMap.keys()):
-                return False
-
+        matchCount = 0
         for k, v in value.items():
             # each child value must match corresponding child attribute description
-            if not attrMap[k].matchDescription(v, conform):
-                return False
-        return True
+            if k in attrMap and attrMap[k].matchDescription(v, strict):
+                matchCount += 1
+
+        if strict:
+            return matchCount == len(value.items()) == len(self._groupDesc)
+
+        return matchCount > 0
 
     def retrieveChildrenUids(self):
         allUids = []
@@ -166,15 +167,15 @@ class GroupAttribute(Attribute):
 class Param(Attribute):
     """
     """
-    def __init__(self, name, label, description, value, uid, group, advanced, enabled):
-        super(Param, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+    def __init__(self, name, label, description, value, uid, group, advanced, semantic, enabled):
+        super(Param, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
 
 class File(Attribute):
     """
     """
-    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, enabled=True):
-        super(File, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, semantic='', enabled=True):
+        super(File, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def validateValue(self, value):
         if not isinstance(value, pyCompatibility.basestring):
@@ -185,8 +186,8 @@ class File(Attribute):
 class BoolParam(Param):
     """
     """
-    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, enabled=True):
-        super(BoolParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, semantic='', enabled=True):
+        super(BoolParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def validateValue(self, value):
         try:
@@ -198,9 +199,9 @@ class BoolParam(Param):
 class IntParam(Param):
     """
     """
-    def __init__(self, name, label, description, value, range, uid, group='allParams', advanced=False, enabled=True):
+    def __init__(self, name, label, description, value, range, uid, group='allParams', advanced=False, semantic='', enabled=True):
         self._range = range
-        super(IntParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+        super(IntParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def validateValue(self, value):
         # handle unsigned int values that are translated to int by shiboken and may overflow
@@ -217,9 +218,9 @@ class IntParam(Param):
 class FloatParam(Param):
     """
     """
-    def __init__(self, name, label, description, value, range, uid, group='allParams', advanced=False, enabled=True):
+    def __init__(self, name, label, description, value, range, uid, group='allParams', advanced=False, semantic='', enabled=True):
         self._range = range
-        super(FloatParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+        super(FloatParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def validateValue(self, value):
         try:
@@ -233,13 +234,13 @@ class FloatParam(Param):
 class ChoiceParam(Param):
     """
     """
-    def __init__(self, name, label, description, value, values, exclusive, uid, group='allParams', joinChar=' ', advanced=False, enabled=True):
+    def __init__(self, name, label, description, value, values, exclusive, uid, group='allParams', joinChar=' ', advanced=False, semantic='', enabled=True):
         assert values
         self._values = values
         self._exclusive = exclusive
         self._joinChar = joinChar
         self._valueType = type(self._values[0])  # cast to value type
-        super(ChoiceParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+        super(ChoiceParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def conformValue(self, val):
         """ Conform 'val' to the correct type and check for its validity """
@@ -264,8 +265,8 @@ class ChoiceParam(Param):
 class StringParam(Param):
     """
     """
-    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, enabled=True):
-        super(StringParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, enabled=enabled)
+    def __init__(self, name, label, description, value, uid, group='allParams', advanced=False, semantic='', enabled=True):
+        super(StringParam, self).__init__(name=name, label=label, description=description, value=value, uid=uid, group=group, advanced=advanced, semantic=semantic, enabled=enabled)
 
     def validateValue(self, value):
         if not isinstance(value, pyCompatibility.basestring):
@@ -420,9 +421,13 @@ class Node(object):
     size = StaticNodeSize(1)
     parallelization = None
     documentation = ''
+    category = 'Other'
 
     def __init__(self):
         pass
+
+    def upgradeAttributeValues(self, attrValues, fromVersion):
+        return attrValues
 
     @classmethod
     def update(cls, node):
@@ -469,7 +474,7 @@ class CommandLineNode(Node):
             if not alreadyInEnv:
                 cmdPrefix = '{rez} {packageFullName} -- '.format(rez=os.environ.get('REZ_ENV'), packageFullName=chunk.node.packageFullName)
         cmdSuffix = ''
-        if chunk.node.isParallelized:
+        if chunk.node.isParallelized and chunk.node.size > 1:
             cmdSuffix = ' ' + self.commandLineRange.format(**chunk.range.toDict())
         return cmdPrefix + chunk.node.nodeDesc.commandLine.format(**chunk.node._cmdVars) + cmdSuffix
 

@@ -1,5 +1,5 @@
 from PySide2 import QtCore, QtQml
-
+import shiboken2
 
 class QObjectListModel(QtCore.QAbstractListModel):
     """
@@ -113,6 +113,7 @@ class QObjectListModel(QtCore.QAbstractListModel):
     ############
     # List API #
     ############
+    @QtCore.Slot(QtCore.QObject)
     def append(self, obj):
         """ Insert object at the end of the model. """
         self.extend([obj])
@@ -182,6 +183,7 @@ class QObjectListModel(QtCore.QAbstractListModel):
         self.endRemoveRows()
         self.countChanged.emit()
 
+    @QtCore.Slot(QtCore.QObject)
     def remove(self, obj):
         """ Removes the first occurrence of the given object. Raises a ValueError if not in list. """
         if not self.contains(obj):
@@ -216,6 +218,7 @@ class QObjectListModel(QtCore.QAbstractListModel):
     def reset(self, objects):
         self.setObjectList(objects)
 
+    @QtCore.Slot(QtCore.QObject, result=bool)
     def contains(self, obj):
         """ Returns true if the list contains an occurrence of object;
         otherwise returns false.
@@ -271,7 +274,7 @@ class QObjectListModel(QtCore.QAbstractListModel):
 
     def _dereferenceItem(self, item):
         # Ask for object deletion if parented to the model
-        if item.parent() == self:
+        if shiboken2.isValid(item) and item.parent() == self:
             # delay deletion until the next event loop
             # This avoids warnings when the QML engine tries to evaluate (but should not)
             # an object that has already been deleted

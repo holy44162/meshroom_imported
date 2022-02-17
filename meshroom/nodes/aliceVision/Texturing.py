@@ -1,6 +1,7 @@
-__version__ = "5.0"
+__version__ = "6.0"
 
-from meshroom.core import desc
+from meshroom.core import desc, Version, pyCompatibility
+import logging
 
 
 class Texturing(desc.CommandLineNode):
@@ -8,6 +9,7 @@ class Texturing(desc.CommandLineNode):
     cpu = desc.Level.INTENSIVE
     ram = desc.Level.INTENSIVE
 
+    category = 'Dense Reconstruction'
     documentation = '''
 This node computes the texturing on the mesh.
 
@@ -24,7 +26,7 @@ Many cameras are contributing to the low frequencies and only the best ones cont
     inputs = [
         desc.File(
             name='input',
-            label='Input',
+            label='Dense SfMData',
             description='SfMData file.',
             value='',
             uid=[0],
@@ -38,8 +40,15 @@ Many cameras are contributing to the low frequencies and only the best ones cont
         ),
         desc.File(
             name='inputMesh',
-            label='Other Input Mesh',
+            label='Mesh',
             description='Optional input mesh to texture. By default, it will texture the result of the reconstruction.',
+            value='',
+            uid=[0],
+        ),
+        desc.File(
+            name='inputRefMesh',
+            label='Ref Mesh',
+            description='Optional input mesh to compute height maps and normal maps. If not provided, no additional maps with geometric information will be generated.',
             value='',
             uid=[0],
         ),
@@ -62,13 +71,105 @@ Many cameras are contributing to the low frequencies and only the best ones cont
             uid=[0],
         ),
         desc.ChoiceParam(
-            name='outputTextureFileType',
-            label='Texture File Type',
-            description='Texture File Type',
-            value='png',
-            values=('jpg', 'png', 'tiff', 'exr'),
+            name='outputMeshFileType',
+            label='Mesh File Type',
+            description='File Type',
+            value='obj',
+            values=('obj', 'gltf', 'fbx', 'stl'),
             exclusive=True,
             uid=[0],
+        ),
+        desc.GroupAttribute(name="colorMapping", label="Color Mapping", description="Color Map Parameters",
+            enabled=lambda node: (node.imagesFolder.value != ''),
+            group=None,
+            groupDesc=[
+                desc.BoolParam(
+                    name='enable',
+                    label='Enable',
+                    description='Generate Textures',
+                    value=True,
+                    uid=[],
+                    group=None,
+                ),
+                desc.ChoiceParam(
+                    name='colorMappingFileType',
+                    label='File Type',
+                    description='Texture File Type',
+                    value='exr',
+                    values=('exr', 'png', 'tiff', 'jpg'),
+                    exclusive=True,
+                    uid=[0],
+                    enabled=lambda node: node.colorMapping.enable.value,
+                ),
+            ],
+        ),
+        desc.GroupAttribute(name="bumpMapping", label="Bump Mapping", description="Bump Mapping Parameters",
+            enabled=lambda node: (node.inputRefMesh.value != ''),
+            group=None,
+            groupDesc=[
+                desc.BoolParam(
+                    name='enable',
+                    label='Enable',
+                    description='Generate Normal / Bump Maps',
+                    value=True,
+                    uid=[],
+                    group=None,
+                ),
+                desc.ChoiceParam(
+                    name='bumpType',
+                    label='Bump Type',
+                    description='Export Normal Map or Height Map',
+                    value='Normal',
+                    values=('Height', 'Normal'),
+                    exclusive=True,
+                    uid=[0],
+                    enabled=lambda node: node.bumpMapping.enable.value,
+                ),
+                desc.ChoiceParam(
+                    name='normalFileType',
+                    label='File Type',
+                    description='NormalMap Texture File Type',
+                    value='exr',
+                    values = ('exr', 'png', 'tiff', 'jpg'),
+                    exclusive=True,
+                    uid=[0],
+                    enabled=lambda node: node.bumpMapping.enable.value and node.bumpMapping.bumpType.value == "Normal",
+                ),
+                desc.ChoiceParam(
+                    name='heightFileType',
+                    label='File Type',
+                    description='HeightMap Texture File Type',
+                    value='exr',
+                    values=('exr',),
+                    exclusive=True,
+                    uid=[0],
+                    enabled=lambda node: node.bumpMapping.enable.value and node.bumpMapping.bumpType.value == "Height",
+                ),
+            ],
+        ),
+        desc.GroupAttribute(name="displacementMapping", label="Displacement Mapping", description="Displacement Mapping Parameters",
+            enabled=lambda node: (node.inputRefMesh.value != ''),
+            group=None,
+            groupDesc=[
+                desc.BoolParam(
+                    name='enable',
+                    label='Enable',
+                    description='Generate Height Maps for Displacement',
+                    value=True,
+                    uid=[],
+                    group=None,
+                ),
+                desc.ChoiceParam(
+                    name='displacementMappingFileType',
+                    label='File Type',
+                    description='HeightMap Texture File Type',
+                    value='exr',
+                    values=('exr',),
+                    exclusive=True,
+                    uid=[0],
+                    enabled=lambda node: node.displacementMapping.enable.value,
+                ),
+            ],
         ),
         desc.ChoiceParam(
             name='unwrapMethod',
@@ -188,9 +289,9 @@ Many cameras are contributing to the low frequencies and only the best ones cont
         desc.ChoiceParam(
             name='visibilityRemappingMethod',
             label='Visibility Remapping Method',
-            description='''Method to remap visibilities from the reconstruction to the input mesh (Pull, Push, PullPush).''',
+            description='''Method to remap visibilities from the reconstruction to the input mesh (Pull, Push, PullPush, MeshItself).''',
             value='PullPush',
-            values=['Pull', 'Push', 'PullPush'],
+            values=['Pull', 'Push', 'PullPush', 'MeshItself'],
             exclusive=True,
             uid=[0],
             advanced=True,
@@ -219,33 +320,42 @@ Many cameras are contributing to the low frequencies and only the best ones cont
     outputs = [
         desc.File(
             name='output',
-            label='Output Folder',
+            label='Folder',
             description='Folder for output mesh: OBJ, material and texture files.',
             value=desc.Node.internalFolder,
             uid=[],
         ),
         desc.File(
             name='outputMesh',
-            label='Output Mesh',
-            description='Folder for output mesh: OBJ, material and texture files.',
-            value=desc.Node.internalFolder + 'texturedMesh.obj',
+            label='Mesh',
+            description='Output Mesh file.',
+            value=desc.Node.internalFolder + 'texturedMesh.{outputMeshFileTypeValue}',
             uid=[],
             group='',
             ),
         desc.File(
             name='outputMaterial',
-            label='Output Material',
-            description='Folder for output mesh: OBJ, material and texture files.',
+            enabled= lambda node: node.outputMeshFileType.value == "obj",
+            label='Material',
+            description='Output Material file.',
             value=desc.Node.internalFolder + 'texturedMesh.mtl',
             uid=[],
             group='',
             ),
         desc.File(
             name='outputTextures',
-            label='Output Textures',
-            description='Folder for output mesh: OBJ, material and texture files.',
-            value=desc.Node.internalFolder + 'texture_*.{outputTextureFileTypeValue}',
+            label='Textures',
+            description='Output Texture files.',
+            value= lambda attr: desc.Node.internalFolder + 'texture_*.' + attr.node.colorMapping.colorMappingFileType.value if attr.node.colorMapping.enable.value else '',
             uid=[],
             group='',
             ),
     ]
+
+    def upgradeAttributeValues(self, attrValues, fromVersion):
+        if fromVersion < Version(6, 0):
+            outputTextureFileType = attrValues['outputTextureFileType']
+            if isinstance(outputTextureFileType, pyCompatibility.basestring):
+                attrValues['colorMapping'] = {}
+                attrValues['colorMapping']['colorMappingFileType'] = outputTextureFileType
+        return attrValues

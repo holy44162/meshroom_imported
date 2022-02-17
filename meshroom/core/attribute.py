@@ -71,30 +71,57 @@ class Attribute(BaseObject):
     def root(self):
         return self._root() if self._root else None
 
-    def absoluteName(self):
-        return '{}.{}.{}'.format(self.node.graph.name, self.node.name, self._name)
-
-    def getFullName(self):
-        """ Name inside the Graph: nodeName.name """
-        if isinstance(self.root, ListAttribute):
-            return '{}[{}]'.format(self.root.getFullName(), self.root.index(self))
-        elif isinstance(self.root, GroupAttribute):
-            return '{}.{}'.format(self.root.getFullName(), self._name)
-        return '{}.{}'.format(self.node.name, self._name)
-
-    def asLinkExpr(self):
-        """ Return link expression for this Attribute """
-        return "{" + self.getFullName() + "}"
-
     def getName(self):
         """ Attribute name """
         return self._name
 
+    def getFullName(self):
+        """ Name inside the Graph: groupName.name """
+        if isinstance(self.root, ListAttribute):
+            return '{}[{}]'.format(self.root.getFullName(), self.root.index(self))
+        elif isinstance(self.root, GroupAttribute):
+            return '{}.{}'.format(self.root.getFullName(), self.getName())
+        return self.getName()
+
+    def getFullNameToNode(self):
+        """ Name inside the Graph: nodeName.groupName.name """
+        return '{}.{}'.format(self.node.name, self.getFullName())
+
+    def getFullNameToGraph(self):
+        """ Name inside the Graph: graphName.nodeName.groupName.name """
+        return '{}.{}'.format(self.node.graph.name, self.getFullNameToNode())
+
+    def asLinkExpr(self):
+        """ Return link expression for this Attribute """
+        return "{" + self.getFullNameToNode() + "}"
+
     def getType(self):
         return self.attributeDesc.__class__.__name__
 
+    def _isReadOnly(self):
+        return not self._isOutput and self.node.isCompatibilityNode
+
+    def getBaseType(self):
+        return self.getType()
+
     def getLabel(self):
         return self._label
+
+    def getFullLabel(self):
+        """ Full Label includes the name of all parent groups, e.g. 'groupLabel subGroupLabel Label' """
+        if isinstance(self.root, ListAttribute):
+            return self.root.getFullLabel()
+        elif isinstance(self.root, GroupAttribute):
+            return '{} {}'.format(self.root.getFullLabel(), self.getLabel())
+        return self.getLabel()
+
+    def getFullLabelToNode(self):
+        """ Label inside the Graph: nodeLabel groupLabel Label """
+        return '{} {}'.format(self.node.label, self.getFullLabel())
+
+    def getFullLabelToGraph(self):
+        """ Label inside the Graph: graphName nodeLabel groupLabel Label """
+        return '{} {}'.format(self.node.graph.name, self.getFullLabelToNode())
 
     def getEnabled(self):
         if isinstance(self.desc.enabled, types.FunctionType):
@@ -136,12 +163,16 @@ class Attribute(BaseObject):
             self.requestGraphUpdate()
         self.valueChanged.emit()
 
+    def upgradeValue(self, exportedValue):
+        self._set_value(exportedValue)
+
     def resetValue(self):
-        self._value = ""
+        self._value = self.attributeDesc.value
 
     def requestGraphUpdate(self):
         if self.node.graph:
             self.node.graph.markNodesDirty(self.node)
+            self.node.graph.update()
 
     @property
     def isOutput(self):
@@ -170,7 +201,7 @@ class Attribute(BaseObject):
     def isLink(self):
         """ Whether the attribute is a link to another attribute. """
         # note: directly use self.node.graph._edges to avoid using the property that may become invalid at some point
-        return self.node.graph and self.isInput and self in self.node.graph._edges.keys()
+        return self.node.graph and self.isInput and self.node.graph._edges and self in self.node.graph._edges.keys()
 
     @staticmethod
     def isLinkExpression(value):
@@ -189,6 +220,14 @@ class Attribute(BaseObject):
         if linkParam.isLink:
             return linkParam.getLinkParam(recursive)
         return linkParam
+
+    @property
+    def hasOutputConnections(self):
+        """ Whether the attribute has output connections, i.e is the source of at least one edge. """
+        # safety check to avoid evaluation errors
+        if not self.node.graph or not self.node.graph.edges:
+            return False
+        return next((edge for edge in self.node.graph.edges.values() if edge.src == self), None) is not None
 
     def _applyExpr(self):
         """
@@ -247,14 +286,23 @@ class Attribute(BaseObject):
 
     name = Property(str, getName, constant=True)
     fullName = Property(str, getFullName, constant=True)
+    fullNameToNode = Property(str, getFullNameToNode, constant=True)
+    fullNameToGraph = Property(str, getFullNameToGraph, constant=True)
     label = Property(str, getLabel, constant=True)
+    fullLabel = Property(str, getFullLabel, constant=True)
+    fullLabelToNode = Property(str, getFullLabelToNode, constant=True)
+    fullLabelToGraph = Property(str, getFullLabelToGraph, constant=True)
     type = Property(str, getType, constant=True)
+    baseType = Property(str, getType, constant=True)
+    isReadOnly = Property(bool, _isReadOnly, constant=True)
     desc = Property(desc.Attribute, lambda self: self.attributeDesc, constant=True)
     valueChanged = Signal()
     value = Property(Variant, _get_value, _set_value, notify=valueChanged)
     isOutput = Property(bool, isOutput.fget, constant=True)
     isLinkChanged = Signal()
     isLink = Property(bool, isLink.fget, notify=isLinkChanged)
+    hasOutputConnectionsChanged = Signal()
+    hasOutputConnections = Property(bool, hasOutputConnections.fget, notify=hasOutputConnectionsChanged)
     isDefault = Property(bool, _isDefault, notify=valueChanged)
     linkParam = Property(BaseObject, getLinkParam, notify=isLinkChanged)
     rootLinkParam = Property(BaseObject, lambda self: self.getLinkParam(recursive=True), notify=isLinkChanged)
@@ -281,6 +329,9 @@ class ListAttribute(Attribute):
     def __len__(self):
         return len(self._value)
 
+    def getBaseType(self):
+        return self.attributeDesc.elementDesc.__class__.__name__
+
     def at(self, idx):
         """ Returns child attribute at index 'idx' """
         # implement 'at' rather than '__getitem__'
@@ -303,6 +354,24 @@ class ListAttribute(Attribute):
         else:
             newValue = self.desc.validateValue(value)
             self.extend(newValue)
+        self.requestGraphUpdate()
+
+    def upgradeValue(self, exportedValues):
+        if not isinstance(exportedValues, list):
+            if isinstance(exportedValues, ListAttribute) or Attribute.isLinkExpression(exportedValues):
+                self._set_value(exportedValues)
+                return
+            raise RuntimeError("ListAttribute.upgradeValue: the given value is of type " + str(type(exportedValues)) + " but a 'list' is expected.")
+
+        attrs = []
+        for v in exportedValues:
+            a = attributeFactory(self.attributeDesc.elementDesc, None, self.isOutput, self.node, self)
+            a.upgradeValue(v)
+            attrs.append(a)
+        index = len(self._value)
+        self._value.insert(index, attrs)
+        self.valueChanged.emit()
+        self._applyExpr()
         self.requestGraphUpdate()
 
     @raiseIfLink
@@ -385,6 +454,7 @@ class ListAttribute(Attribute):
     # Override value property setter
     value = Property(Variant, Attribute._get_value, _set_value, notify=Attribute.valueChanged)
     isDefault = Property(bool, _isDefault, notify=Attribute.valueChanged)
+    baseType = Property(str, getBaseType, constant=True)
 
 
 class GroupAttribute(Attribute):
@@ -417,8 +487,25 @@ class GroupAttribute(Attribute):
             for key, v in value.items():
                 self._value.get(key).value = v
         elif isinstance(value, (list, tuple)):
+            if len(self.desc._groupDesc) != len(value):
+                raise AttributeError("Incorrect number of values on GroupAttribute: {}".format(str(value)))
             for attrDesc, v in zip(self.desc._groupDesc, value):
                 self._value.get(attrDesc.name).value = v
+        else:
+            raise AttributeError("Failed to set on GroupAttribute: {}".format(str(value)))
+
+    def upgradeValue(self, exportedValue):
+        value = self.desc.validateValue(exportedValue)
+        if isinstance(value, dict):
+            # set individual child attribute values
+            for key, v in value.items():
+                if key in self._value.keys():
+                    self._value.get(key).upgradeValue(v)
+        elif isinstance(value, (list, tuple)):
+            if len(self.desc._groupDesc) != len(value):
+                raise AttributeError("Incorrect number of values on GroupAttribute: {}".format(str(value)))
+            for attrDesc, v in zip(self.desc._groupDesc, value):
+                self._value.get(attrDesc.name).upgradeValue(v)
         else:
             raise AttributeError("Failed to set on GroupAttribute: {}".format(str(value)))
 

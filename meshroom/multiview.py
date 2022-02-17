@@ -12,13 +12,15 @@ imageExtensions = (
     # cineon:
     '.cin',
     # dds
-    'dds'
+    '.dds',
     # dpx:
     '.dpx',
     # gif:
     '.gif',
     # hdr:
     '.hdr', '.rgbe',
+    # heif
+    '.heic', '.heif', '.avif',
     # ico:
     '.ico',
     # iff:
@@ -178,8 +180,14 @@ def panoramaFisheyeHdr(inputImages=None, inputViewpoints=None, inputIntrinsics=N
         graph = Graph('PanoramaFisheyeHDR')
     with GraphModification(graph):
         panoramaHdr(inputImages, inputViewpoints, inputIntrinsics, output, graph)
-        for panoramaInit in graph.nodesByType("PanoramaInit"):
+        for panoramaInit in graph.nodesOfType("PanoramaInit"):
             panoramaInit.attribute("useFisheye").value = True
+        for featureExtraction in graph.nodesOfType("FeatureExtraction"):
+            # when using fisheye images, 'sift' performs better than 'dspsift'
+            featureExtraction.attribute("describerTypes").value = ['sift']
+            # when using fisheye images, the overlap between images can be small
+            # and thus requires many features to get enough correspondances for cameras estimation
+            featureExtraction.attribute("describerPreset").value = 'high'
     return graph
 
 def panoramaHdrPipeline(graph):
@@ -206,15 +214,21 @@ def panoramaHdrPipeline(graph):
 
     ldr2hdrCalibration = graph.addNewNode('LdrToHdrCalibration',
                                input=ldr2hdrSampling.input,
+                               userNbBrackets=ldr2hdrSampling.userNbBrackets,
+                               byPass=ldr2hdrSampling.byPass,
+                               channelQuantizationPower=ldr2hdrSampling.channelQuantizationPower,
                                samples=ldr2hdrSampling.output)
 
     ldr2hdrMerge = graph.addNewNode('LdrToHdrMerge',
                                input=ldr2hdrCalibration.input,
+                               userNbBrackets=ldr2hdrCalibration.userNbBrackets,
+                               byPass=ldr2hdrCalibration.byPass,
+                               channelQuantizationPower=ldr2hdrCalibration.channelQuantizationPower,
                                response=ldr2hdrCalibration.response)
 
     featureExtraction = graph.addNewNode('FeatureExtraction',
                                          input=ldr2hdrMerge.outSfMData,
-                                         describerPreset='high')
+                                         describerQuality='high')
 
     panoramaInit = graph.addNewNode('PanoramaInit',
                                      input=featureExtraction.input,
@@ -229,26 +243,40 @@ def panoramaHdrPipeline(graph):
     featureMatching = graph.addNewNode('FeatureMatching',
                                        input=imageMatching.input,
                                        featuresFolders=imageMatching.featuresFolders,
-                                       imagePairsList=imageMatching.output)
+                                       imagePairsList=imageMatching.output,
+                                       describerTypes=featureExtraction.describerTypes)
 
     panoramaEstimation = graph.addNewNode('PanoramaEstimation',
-                                           input=featureMatching.input,
-                                           featuresFolders=featureMatching.featuresFolders,
-                                           matchesFolders=[featureMatching.output])
+                                          input=featureMatching.input,
+                                          featuresFolders=featureMatching.featuresFolders,
+                                          matchesFolders=[featureMatching.output],
+                                          describerTypes=featureMatching.describerTypes)
 
     panoramaOrientation = graph.addNewNode('SfMTransform',
                                            input=panoramaEstimation.output,
-                                           method='from_single_camera')
+                                           method='manual')
 
     panoramaWarping = graph.addNewNode('PanoramaWarping',
                                        input=panoramaOrientation.output)
 
+    panoramaSeams =  graph.addNewNode('PanoramaSeams',
+                                       input=panoramaWarping.input,
+                                       warpingFolder=panoramaWarping.output
+                                       )
+
     panoramaCompositing = graph.addNewNode('PanoramaCompositing',
-                                           input=panoramaWarping.input,
-                                           warpingFolder=panoramaWarping.output)
+                                           input=panoramaSeams.input,
+                                           warpingFolder=panoramaSeams.warpingFolder,
+                                           labels=panoramaSeams.output
+                                        )
+
+    panoramaMerging = graph.addNewNode('PanoramaMerging',
+                                           input=panoramaCompositing.input,
+                                           compositingFolder=panoramaCompositing.output
+                                        )
 
     imageProcessing = graph.addNewNode('ImageProcessing',
-                                       input=panoramaCompositing.output,
+                                       input=panoramaMerging.outputPanorama,
                                        fixNonFinite=True,
                                        fillHoles=True,
                                        extension='exr')
@@ -262,7 +290,9 @@ def panoramaHdrPipeline(graph):
         panoramaEstimation,
         panoramaOrientation,
         panoramaWarping,
+        panoramaSeams,
         panoramaCompositing,
+        panoramaMerging,
         imageProcessing,
     ]
 
@@ -336,11 +366,13 @@ def sfmPipeline(graph):
     featureMatching = graph.addNewNode('FeatureMatching',
                                        input=imageMatching.input,
                                        featuresFolders=imageMatching.featuresFolders,
-                                       imagePairsList=imageMatching.output)
+                                       imagePairsList=imageMatching.output,
+                                       describerTypes=featureExtraction.describerTypes)
     structureFromMotion = graph.addNewNode('StructureFromMotion',
                                            input=featureMatching.input,
                                            featuresFolders=featureMatching.featuresFolders,
-                                           matchesFolders=[featureMatching.output])
+                                           matchesFolders=[featureMatching.output],
+                                           describerTypes=featureMatching.describerTypes)
     return [
         cameraInit,
         featureExtraction,
@@ -415,16 +447,18 @@ def sfmAugmentation(graph, sourceSfm, withMVS=False):
     featureMatching = graph.addNewNode('FeatureMatching',
                                        input=imageMatchingMulti.outputCombinedSfM,
                                        featuresFolders=imageMatchingMulti.featuresFolders,
-                                       imagePairsList=imageMatchingMulti.output)
+                                       imagePairsList=imageMatchingMulti.output,
+                                       describerTypes=featureExtraction.describerTypes)
     structureFromMotion = graph.addNewNode('StructureFromMotion',
                                            input=featureMatching.input,
                                            featuresFolders=featureMatching.featuresFolders,
-                                           matchesFolders=[featureMatching.output])
+                                           matchesFolders=[featureMatching.output],
+                                           describerTypes=featureMatching.describerTypes)
     graph.addEdge(sourceSfm.output, imageMatchingMulti.inputB)
 
     sfmNodes = [
         cameraInit,
-        featureMatching,
+        featureExtraction,
         imageMatchingMulti,
         featureMatching,
         structureFromMotion
@@ -436,3 +470,134 @@ def sfmAugmentation(graph, sourceSfm, withMVS=False):
         mvsNodes = mvsPipeline(graph, structureFromMotion)
 
     return sfmNodes, mvsNodes
+
+
+def cameraTrackingPipeline(graph, sourceSfm=None):
+    """
+    Instantiate a camera tracking pipeline inside 'graph'.
+
+    Args:
+        graph (Graph/UIGraph): the graph in which nodes should be instantiated
+
+    Returns:
+        list of Node: the created nodes
+    """
+
+    with GraphModification(graph):
+        if sourceSfm is None:
+            cameraInitT, featureExtractionT, imageMatchingT, featureMatchingT, structureFromMotionT = sfmPipeline(graph)
+        else:
+            sfmNodes, _ = sfmAugmentation(graph, sourceSfm)
+            cameraInitT, featureExtractionT, imageMatchingT, featureMatchingT, structureFromMotionT = sfmNodes
+
+        distortionCalibrationT = graph.addNewNode('DistortionCalibration',
+                                                  input=cameraInitT.output)
+
+        graph.removeEdge(featureMatchingT.input)
+        graph.addEdge(distortionCalibrationT.outSfMData, featureMatchingT.input)
+
+        imageMatchingT.attribute("nbMatches").value = 5  # voctree nb matches
+        imageMatchingT.attribute("nbNeighbors").value = 10
+
+        structureFromMotionT.attribute("minNumberOfMatches").value = 0
+        structureFromMotionT.attribute("minInputTrackLength").value = 5
+        structureFromMotionT.attribute("minNumberOfObservationsForTriangulation").value = 3
+        structureFromMotionT.attribute("minAngleForTriangulation").value = 1.0
+        structureFromMotionT.attribute("minAngleForLandmark").value = 0.5
+
+        exportAnimatedCameraT = graph.addNewNode('ExportAnimatedCamera', input=structureFromMotionT.output)
+        if sourceSfm:
+            graph.addEdge(sourceSfm.output, exportAnimatedCameraT.sfmDataFilter)
+
+    # store current pipeline version in graph header
+    graph.header.update({'pipelineVersion': __version__})
+
+    return [
+        cameraInitT,
+        featureExtractionT,
+        imageMatchingT,
+        featureMatchingT,
+        distortionCalibrationT,
+        structureFromMotionT,
+        exportAnimatedCameraT,
+        ]
+
+
+def cameraTracking(inputImages=list(), inputViewpoints=list(), inputIntrinsics=list(), output='', graph=None):
+    if not graph:
+        graph = Graph('Camera Tracking')
+    with GraphModification(graph):
+        trackingNodes = cameraTrackingPipeline(graph)
+        cameraInit = trackingNodes[0]
+        cameraInit.viewpoints.extend([{'path': image} for image in inputImages])
+        cameraInit.viewpoints.extend(inputViewpoints)
+        cameraInit.intrinsics.extend(inputIntrinsics)
+
+        if output:
+            exportNode = trackingNodes[-1]
+            graph.addNewNode('Publish', output=output, inputFiles=[exportNode.output])
+
+    return graph
+
+
+def photogrammetryAndCameraTracking(inputImages=list(), inputViewpoints=list(), inputIntrinsics=list(), output='', graph=None):
+    if not graph:
+        graph = Graph('Photogrammetry And Camera Tracking')
+    with GraphModification(graph):
+        cameraInit, featureExtraction, imageMatching, featureMatching, structureFromMotion = sfmPipeline(graph)
+
+        cameraInitT, featureExtractionT, imageMatchingMultiT, featureMatchingT, distortionCalibrationT, structureFromMotionT, exportAnimatedCameraT = cameraTrackingPipeline(graph, structureFromMotion)
+
+        cameraInit.viewpoints.extend([{'path': image} for image in inputImages])
+        cameraInit.viewpoints.extend(inputViewpoints)
+        cameraInit.intrinsics.extend(inputIntrinsics)
+
+        if output:
+            graph.addNewNode('Publish', output=output, inputFiles=[exportAnimatedCameraT.output])
+
+    return graph
+
+
+def photogrammetryDraft(inputImages=None, inputViewpoints=None, inputIntrinsics=None, output='', graph=None):
+    """
+    Create a new Graph with a complete photogrammetry pipeline without requiring a NVIDIA CUDA video card. Something also named Draft Meshing.
+    More information on that pipeline https://github.com/alicevision/meshroom/wiki/Draft-Meshing
+
+    Args:
+        inputImages (list of str, optional): list of image file paths
+        inputViewpoints (list of Viewpoint, optional): list of Viewpoints
+        output (str, optional): the path to export reconstructed model to
+
+    Returns:
+        Graph: the created graph
+    """
+    if not graph:
+        graph = Graph('PhotogrammetryDraft')
+    with GraphModification(graph):
+        sfmNodes = sfmPipeline(graph)
+        sfmNode = sfmNodes[-1]
+
+        meshing = graph.addNewNode('Meshing',
+                                   input=sfmNode.output)
+
+        meshFiltering = graph.addNewNode('MeshFiltering',
+                                         inputMesh=meshing.outputMesh)
+        texturing = graph.addNewNode('Texturing',
+                                     input=meshing.output,
+                                     inputMesh=meshFiltering.outputMesh)
+
+        cameraInit = sfmNodes[0]
+
+        if inputImages:
+            cameraInit.viewpoints.extend([{'path': image} for image in inputImages])
+        if inputViewpoints:
+            cameraInit.viewpoints.extend(inputViewpoints)
+        if inputIntrinsics:
+            cameraInit.intrinsics.extend(inputIntrinsics)
+
+        if output:
+            graph.addNewNode('Publish', output=output, inputFiles=[texturing.outputMesh,
+                                                                   texturing.outputMaterial,
+                                                                   texturing.outputTextures])
+
+    return graph

@@ -9,6 +9,7 @@ class PrepareDenseScene(desc.CommandLineNode):
     parallelization = desc.Parallelization(blockSize=40)
     commandLineRange = '--rangeStart {rangeStart} --rangeSize {rangeBlockSize}'
 
+    category = 'Dense Reconstruction'
     documentation = '''
 This node export undistorted images so the depth map and texturing can be computed on Pinhole images without distortion.
 '''
@@ -16,7 +17,7 @@ This node export undistorted images so the depth map and texturing can be comput
     inputs = [
         desc.File(
             name='input',
-            label='Input',
+            label='SfMData',
             description='''SfMData file.''',
             value='',
             uid=[0],
@@ -32,6 +33,18 @@ This node export undistorted images so the depth map and texturing can be comput
             name="imagesFolders",
             label="Images Folders",
             description='Use images from specific folder(s). Filename should be the same or the image uid.',
+        ),
+        desc.ListAttribute(
+            elementDesc=desc.File(
+                name="masksFolder",
+                label="Masks Folder",
+                description="",
+                value="",
+                uid=[0],
+            ),
+            name="masksFolders",
+            label="Masks Folders",
+            description='Use masks from specific folder(s). Filename should be the same or the image uid.',
         ),
         desc.ChoiceParam(
             name='outputFileType',
@@ -81,14 +94,14 @@ This node export undistorted images so the depth map and texturing can be comput
     outputs = [
         desc.File(
             name='output',
-            label='Output',
+            label='Images Folder',
             description='''Output folder.''',
             value=desc.Node.internalFolder,
             uid=[],
         ),
         desc.File(
             name='outputUndistorted',
-            label='Undistorted images',
+            label='Undistorted Images',
             description='List of undistorted images.',
             value=desc.Node.internalFolder + '*.{outputFileTypeValue}',
             uid=[],
